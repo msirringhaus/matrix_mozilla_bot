@@ -24,7 +24,7 @@ async fn on_room_message(
     event: OriginalSyncRoomMessageEvent,
     room: Room,
     client: Client,
-    ctx: Ctx<AllInOne>,
+    ctx: Ctx<SharedState>,
 ) -> anyhow::Result<()> {
     if let Room::Joined(room) = room {
         if ctx.cfg.ignore_own_messages && Some(event.sender.as_ref()) == client.user_id() {
@@ -41,7 +41,7 @@ async fn on_room_message(
             if body == "!watch" {
                 let content = RoomMessageEventContent::text_plain("Watching...");
                 room.send(content, None).await?;
-                ctx.rooms.lock().unwrap().push(room.room_id().to_owned());
+                ctx.rooms.lock().unwrap().insert(room.room_id().to_owned());
             }
         }
     }
@@ -84,7 +84,7 @@ async fn on_stripped_state_member(
     }
 }
 
-async fn login_and_sync(aio: AllInOne) -> anyhow::Result<Client> {
+async fn login_and_sync(aio: SharedState) -> anyhow::Result<Client> {
     #[allow(unused_mut)]
     let mut client_builder = Client::builder().homeserver_url(aio.cfg.homeserver_url.clone());
 
@@ -235,16 +235,16 @@ impl Data {
 }
 
 #[derive(Clone)]
-struct AllInOne {
+struct SharedState {
     cfg: BotConfig,
-    rooms: Arc<Mutex<Vec<OwnedRoomId>>>,
+    rooms: Arc<Mutex<HashSet<OwnedRoomId>>>,
 }
 
-impl AllInOne {
+impl SharedState {
     fn new(cfg: BotConfig) -> Self {
         Self {
             cfg,
-            rooms: Arc::new(Mutex::new(Vec::new())),
+            rooms: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 }
@@ -277,7 +277,7 @@ async fn main() -> anyhow::Result<()> {
         ignore_own_messages,
         autojoin,
     );
-    let allinone = AllInOne::new(botconfig);
+    let shared_state = SharedState::new(botconfig);
     let mut sources = [
         Data::new("firefox/candidates", Some("esr"), true),
         Data::new("firefox/releases", Some("esr"), false),
@@ -286,7 +286,7 @@ async fn main() -> anyhow::Result<()> {
         Data::new("security/nss/releases", None, false),
     ];
 
-    let client = login_and_sync(allinone.clone()).await?;
+    let client = login_and_sync(shared_state.clone()).await?;
 
     let sleep_time_in_minutes = 30;
     loop {
@@ -295,7 +295,7 @@ async fn main() -> anyhow::Result<()> {
             let answer = source.fetch_upstream_and_compare().await?;
             if !answer.is_empty() {
                 println!("{} differ: {:?}", source.url_part, answer);
-                let roomids: Vec<_> = allinone
+                let roomids: Vec<_> = shared_state
                     .rooms
                     .lock()
                     .unwrap()
