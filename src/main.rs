@@ -102,7 +102,10 @@ async fn main() -> anyhow::Result<()> {
         for source in &mut sources {
             let answer = source.fetch_upstream_and_compare().await?;
             if !answer.is_empty() {
-                println!("{} differ: {:?}", source.url_part, answer);
+                let mut formatted_answer: Vec<_> = answer.iter().map(|x| x.to_string()).collect();
+                formatted_answer.sort();
+                let answer_str = formatted_answer.join(", ");
+                println!("{} differ: {:?}", source.url_part, answer_str);
                 let roomids: Vec<_> = shared_state
                     .rooms
                     .lock()
@@ -110,13 +113,14 @@ async fn main() -> anyhow::Result<()> {
                     .iter()
                     .map(|x| x.to_owned())
                     .collect();
+
                 for roomid in roomids {
                     if let Some(Room::Joined(room)) = client.get_room(&roomid) {
                         let content = RoomMessageEventContent::text_html(
-                            &format!("{} got new uploads: {:?}", source.url_part, answer),
+                            &format!("{} got new uploads: {}", source.url_part, answer_str),
                             &format!(
-                                "<a href=\"{}/{}/\">{}</a> got new uploads: {:?}",
-                                source.base_url, source.url_part, source.url_part, answer
+                                "<a href=\"{}/{}/\">{}</a> got new uploads: {}",
+                                source.base_url, source.url_part, source.url_part, answer_str
                             ),
                         );
                         room.send(content, None).await?;

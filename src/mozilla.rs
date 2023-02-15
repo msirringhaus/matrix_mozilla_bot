@@ -55,6 +55,7 @@ impl MozData {
         let candidates: HashSet<_> = document
             .select(&selector)
             .map(|x| x.inner_html().trim_end_matches('/').to_string())
+            .filter(|x| x != "..")
             .filter(|x| {
                 if let Some(filt) = &self.filter {
                     x.contains(filt)
