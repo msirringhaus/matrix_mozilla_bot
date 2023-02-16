@@ -16,9 +16,14 @@ mod mozilla;
 use mozilla::MozData;
 
 #[derive(Debug, Clone)]
+enum LoginData {
+    UsernamePassword(String, String),
+    Session(String, String),
+}
+
+#[derive(Debug, Clone)]
 struct BotConfig {
-    username: String,
-    password: String,
+    login_data: LoginData,
     homeserver_url: String,
     ignore_own_messages: bool,
     autojoin: bool,
@@ -26,15 +31,13 @@ struct BotConfig {
 
 impl BotConfig {
     fn new(
-        username: String,
-        password: String,
+        login_data: LoginData,
         homeserver_url: String,
         ignore_own_messages: bool,
         autojoin: bool,
     ) -> Self {
         Self {
-            username,
-            password,
+            login_data,
             homeserver_url,
             ignore_own_messages,
             autojoin,
@@ -71,20 +74,31 @@ async fn main() -> anyhow::Result<()> {
         .add_source(config::Environment::with_prefix("BOT"))
         .build()?;
 
-    let username = settings.get_string("username")?;
-    let password = settings.get_string("password")?;
-    let homeserver_url = settings.get_string("homeserver_url")?;
+    let homeserver_url = settings.get_string("login.homeserver_url")?;
+    let use_session = settings.get_bool("login.use_session").unwrap_or(false);
+    let username = settings.get_string("login.username")?;
+    let password = match settings.get_string("login.password") {
+        Ok(pw) => pw,
+        Err(..) => {
+            rpassword::prompt_password_stderr("Enter Password: ").expect("Failed to read password")
+        }
+    };
+    // If use_session is true, the "password" is really the session-token
+    let login_data = if use_session {
+        LoginData::Session(username, password)
+    } else {
+        LoginData::UsernamePassword(username, password)
+    };
     // // Currently not really used, but I leave it here in case we need it at some point
-    let ignore_own_messages = settings.get_bool("ignore_own_messages").unwrap_or(true);
-    let autojoin = settings.get_bool("autojoin").unwrap_or(true);
+    let ignore_own_messages = settings
+        .get_bool("config.ignore_own_messages")
+        .unwrap_or(true);
+    let autojoin = settings.get_bool("config.autojoin").unwrap_or(true);
+    let sleep_time_in_minutes = settings
+        .get_int("config.sleep_time_in_minutes")
+        .unwrap_or(60) as u64;
     // -------------------------------------------------------
-    let botconfig = BotConfig::new(
-        username,
-        password,
-        homeserver_url,
-        ignore_own_messages,
-        autojoin,
-    );
+    let botconfig = BotConfig::new(login_data, homeserver_url, ignore_own_messages, autojoin);
     let shared_state = SharedState::new(botconfig);
     let mut sources = [
         MozData::new("firefox/candidates", Some("esr"), true),
@@ -96,7 +110,6 @@ async fn main() -> anyhow::Result<()> {
 
     let client = login_and_sync(shared_state.clone()).await?;
 
-    let sleep_time_in_minutes = 30;
     loop {
         sleep(Duration::from_secs(30)).await;
         for source in &mut sources {

@@ -1,4 +1,4 @@
-use super::SharedState;
+use super::{LoginData, SharedState};
 use matrix_sdk::{
     config::SyncSettings,
     event_handler::Ctx,
@@ -9,8 +9,9 @@ use matrix_sdk::{
             MessageType, OriginalSyncRoomMessageEvent, RoomMessageEventContent,
             TextMessageEventContent,
         },
+        ServerName, UserId,
     },
-    Client,
+    Client, Session,
 };
 use tokio::time::{sleep, Duration};
 
@@ -27,6 +28,10 @@ async fn on_room_message(
             return Ok(());
         }
         if let MessageType::Text(TextMessageEventContent { body, .. }) = event.content.msgtype {
+            if body == "!ping" {
+                let content = RoomMessageEventContent::text_plain("pong");
+                room.send(content, None).await?;
+            }
             if body == "!leave" {
                 let content = RoomMessageEventContent::text_plain("Bye");
                 room.send(content, None).await?;
@@ -83,13 +88,35 @@ pub async fn login_and_sync(aio: SharedState) -> anyhow::Result<Client> {
     let mut client_builder = Client::builder().homeserver_url(aio.cfg.homeserver_url.clone());
 
     let client = client_builder.build().await?;
-    client
-        .login_username(&aio.cfg.username, &aio.cfg.password)
-        .initial_device_display_name("Command bot")
-        .send()
-        .await?;
-
-    println!("logged in as {}", aio.cfg.username);
+    match &aio.cfg.login_data {
+        LoginData::UsernamePassword(username, password) => {
+            client
+                .login_username(username, password)
+                .initial_device_display_name("Mozilla bot")
+                .send()
+                .await?;
+            println!("logged in as {}", username);
+        }
+        LoginData::Session(username, token) => {
+            let session = Session {
+                access_token: token.to_owned(),
+                refresh_token: None,
+                user_id: UserId::parse_with_server_name(
+                    username.clone(),
+                    &ServerName::parse(
+                        client
+                            .homeserver()
+                            .await
+                            .host_str()
+                            .expect("Homeserver-URL has no host"),
+                    )?,
+                )?,
+                device_id: "MOWAUSSCTB".into(),
+            };
+            client.restore_login(session).await?;
+            println!("logged in with token");
+        }
+    }
 
     // An initial sync to set up state and so our bot doesn't respond to old
     // messages. If the `StateStore` finds saved state in the location given the
