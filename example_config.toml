@@ -1,0 +1,32 @@
+[login]
+username = "username"
+password = "password"
+homeserver_url = "https://chat.example.com"
+
+[config]
+ignore_own_messages = true
+autojoin = true
+accept_commands_from = ["@alice:alice.com", "@bob:bob.org"]
+
+[subscription.ff_cand]
+url_part="firefox/candidates"
+# Only watch versions >=100 as we are not interested in anything older
+filter="1[0-9][0-9].*"
+query_subdirs= true 
+
+[subscription.ff_rel]
+url_part="firefox/releases"
+query_subdirs= false
+
+[subscription.tb_cand]
+url_part="thunderbird/candidates"
+filter="1[0-9][0-9].*"
+query_subdirs= true
+
+[subscription.tb_rel]
+url_part="thunderbird/releases"
+query_subdirs= false
+
+[subscription.nss_rel]
+url_part="security/nss/releases"
+query_subdirs= false
