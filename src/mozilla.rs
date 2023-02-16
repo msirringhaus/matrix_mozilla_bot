@@ -22,7 +22,12 @@ impl MozData {
 
     pub async fn fetch_upstream_and_compare(&mut self) -> anyhow::Result<HashSet<String>> {
         let answer = self.query_url().await?;
-        let res = answer.difference(&self.data).map(String::clone).collect();
+        // Ignore the first iteration, where we haven't had any data yet
+        let res = if self.data.is_empty() {
+            HashSet::new()
+        } else {
+            answer.difference(&self.data).map(String::clone).collect()
+        };
         self.data = answer;
         Ok(res)
     }
