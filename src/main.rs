@@ -3,6 +3,7 @@ use matrix_sdk::{
     room::Room,
     ruma::{events::room::message::RoomMessageEventContent, OwnedRoomId, OwnedUserId, UserId},
 };
+use regex::Regex;
 use std::{
     collections::HashSet,
     sync::{Arc, Mutex},
@@ -128,9 +129,18 @@ async fn main() -> anyhow::Result<()> {
     );
     let shared_state = SharedState::new(botconfig);
     let mut sources = [
-        MozData::new("firefox/candidates", Some("esr"), true),
-        MozData::new("firefox/releases", Some("esr"), false),
-        MozData::new("thunderbird/candidates", Some("candidates"), true),
+        // We only try to check FF-candidates >100
+        MozData::new(
+            "firefox/candidates",
+            Some(Regex::new("1[0-9][0-9].*")?),
+            true,
+        ),
+        MozData::new("firefox/releases", None, false),
+        MozData::new(
+            "thunderbird/candidates",
+            Some(Regex::new("1[0-9][0-9].*")?),
+            true,
+        ),
         MozData::new("thunderbird/releases", None, false),
         MozData::new("security/nss/releases", None, false),
     ];

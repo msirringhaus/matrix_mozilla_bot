@@ -12,6 +12,7 @@ scraper = { version = "^0.14", default-features=false }
 tokio = { version = "1.25.0", features = ["macros", "rt-multi-thread"] }
 tracing-subscriber = "^0.3"
 rpassword = "5.0"
+regex = "1"
 
 [features]
 sso-login = ["matrix-sdk/sso-login"]

@@ -1452,6 +1452,7 @@ dependencies = [
  "anyhow",
  "config",
  "matrix-sdk",
+ "regex",
  "reqwest",
  "rpassword",
  "scraper",

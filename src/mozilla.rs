@@ -1,20 +1,21 @@
+use regex::Regex;
 use scraper::{Html, Selector};
 use std::collections::HashSet;
 
 pub struct MozData {
     pub url_part: String,
     pub query_subdirs: bool,
-    pub filter: Option<String>,
+    pub filter: Option<Regex>,
     pub data: HashSet<String>,
     pub base_url: String,
 }
 
 impl MozData {
-    pub fn new(url_part: &str, filter: Option<&str>, query_subdirs: bool) -> Self {
+    pub fn new(url_part: &str, filter: Option<Regex>, query_subdirs: bool) -> Self {
         Self {
             url_part: url_part.to_string(),
             query_subdirs,
-            filter: filter.map(str::to_string),
+            filter,
             data: HashSet::new(),
             base_url: "https://ftp.mozilla.org/pub".to_string(),
         }
@@ -63,7 +64,7 @@ impl MozData {
             .filter(|x| x != "..")
             .filter(|x| {
                 if let Some(filt) = &self.filter {
-                    x.contains(filt)
+                    filt.is_match(x)
                 } else {
                     true
                 }
