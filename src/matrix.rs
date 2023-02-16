@@ -55,6 +55,7 @@ async fn on_stripped_state_member(
     room_member: StrippedRoomMemberEvent,
     client: Client,
     room: Room,
+    ctx: Ctx<SharedState>,
 ) {
     if room_member.state_key != client.user_id().unwrap() {
         return;
@@ -62,27 +63,55 @@ async fn on_stripped_state_member(
 
     if let Room::Invited(room) = room {
         tokio::spawn(async move {
-            println!("Autojoining room {}", room.room_id());
-            let mut delay = 2;
+            if ctx.cfg.accept_commands_from.is_empty()
+                || ctx.cfg.accept_commands_from.contains(&room_member.sender)
+            {
+                println!("Autojoining room {}", room.room_id());
+                let mut delay = 2;
 
-            while let Err(err) = room.accept_invitation().await {
-                // retry autojoin due to synapse sending invites, before the
-                // invited user can join for more information see
-                // https://github.com/matrix-org/synapse/issues/4345
-                eprintln!(
-                    "Failed to join room {} ({err:?}), retrying in {delay}s",
-                    room.room_id()
-                );
+                while let Err(err) = room.accept_invitation().await {
+                    // retry autojoin due to synapse sending invites, before the
+                    // invited user can join for more information see
+                    // https://github.com/matrix-org/synapse/issues/4345
+                    eprintln!(
+                        "Failed to join room {} ({err:?}), retrying in {delay}s",
+                        room.room_id()
+                    );
 
-                sleep(Duration::from_secs(delay)).await;
-                delay *= 2;
+                    sleep(Duration::from_secs(delay)).await;
+                    delay *= 2;
 
-                if delay > 3600 {
-                    eprintln!("Can't join room {} ({err:?})", room.room_id());
-                    break;
+                    if delay > 3600 {
+                        eprintln!("Can't join room {} ({err:?})", room.room_id());
+                        break;
+                    }
+                }
+                println!("Successfully joined room {}", room.room_id());
+            } else {
+                println!("Rejecting invite to room {}", room.room_id());
+                let mut delay = 2;
+                while let Err(err) = room.reject_invitation().await {
+                    // retry autojoin due to synapse sending invites, before the
+                    // invited user can join for more information see
+                    // https://github.com/matrix-org/synapse/issues/4345
+                    eprintln!(
+                        "Failed to reject room {} ({err:?}), retrying in {delay}s",
+                        room.room_id()
+                    );
+
+                    sleep(Duration::from_secs(delay)).await;
+                    delay *= 2;
+
+                    if delay > 3600 {
+                        eprintln!("Can't reject room {} ({err:?})", room.room_id());
+                        break;
+                    }
+                    println!(
+                        "Rejected invite from unknown user: {:?}",
+                        room_member.sender
+                    );
                 }
             }
-            println!("Successfully joined room {}", room.room_id());
         });
     }
 }
