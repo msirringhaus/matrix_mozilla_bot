@@ -2,6 +2,7 @@ use regex::Regex;
 use scraper::{Html, Selector};
 use std::collections::HashSet;
 
+#[derive(Debug)]
 pub struct MozData {
     pub url_part: String,
     pub query_subdirs: bool,

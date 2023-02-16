@@ -1,4 +1,4 @@
-use config::Config;
+use config::{Config, ConfigError, Value};
 use matrix_sdk::{
     room::Room,
     ruma::{events::room::message::RoomMessageEventContent, OwnedRoomId, OwnedUserId, UserId},
@@ -119,6 +119,29 @@ async fn main() -> anyhow::Result<()> {
         .into_iter()
         .map(UserId::parse)
         .collect::<Result<Vec<_>, _>>()?;
+
+    let mut sources = Vec::new();
+    for (_name, val) in settings.get_table("subscription")? {
+        let sub = val.into_table()?;
+        let url_part = sub
+            .get("url_part")
+            .ok_or(ConfigError::NotFound(String::from("url_part")))?
+            .clone()
+            .into_string()?;
+        let query_subdirs = sub
+            .get("query_subdirs")
+            .ok_or(ConfigError::NotFound(String::from("query_subdirs")))?
+            .clone()
+            .into_bool()?;
+        let filter = sub
+            .get("filter")
+            .map(Clone::clone)
+            .map(Value::into_string)
+            .transpose()?
+            .map(|x| Regex::new(&x))
+            .transpose()?;
+        sources.push(MozData::new(&url_part, filter, query_subdirs));
+    }
     // -------------------------------------------------------
     let botconfig = BotConfig::new(
         login_data,
@@ -128,22 +151,6 @@ async fn main() -> anyhow::Result<()> {
         accept_commands_from,
     );
     let shared_state = SharedState::new(botconfig);
-    let mut sources = [
-        // We only try to check FF-candidates >100
-        MozData::new(
-            "firefox/candidates",
-            Some(Regex::new("1[0-9][0-9].*")?),
-            true,
-        ),
-        MozData::new("firefox/releases", None, false),
-        MozData::new(
-            "thunderbird/candidates",
-            Some(Regex::new("1[0-9][0-9].*")?),
-            true,
-        ),
-        MozData::new("thunderbird/releases", None, false),
-        MozData::new("security/nss/releases", None, false),
-    ];
 
     let client = login_and_sync(shared_state.clone()).await?;
 
