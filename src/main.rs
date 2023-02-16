@@ -138,7 +138,6 @@ async fn main() -> anyhow::Result<()> {
     let client = login_and_sync(shared_state.clone()).await?;
 
     loop {
-        sleep(Duration::from_secs(30)).await;
         for source in &mut sources {
             let answer = source.fetch_upstream_and_compare().await?;
             if !answer.is_empty() {
