@@ -1,7 +1,7 @@
 use config::Config;
 use matrix_sdk::{
     room::Room,
-    ruma::{events::room::message::RoomMessageEventContent, OwnedRoomId},
+    ruma::{events::room::message::RoomMessageEventContent, OwnedRoomId, OwnedUserId, UserId},
 };
 use std::{
     collections::HashSet,
@@ -30,6 +30,7 @@ struct BotConfig {
     homeserver_url: String,
     ignore_own_messages: bool,
     autojoin: bool,
+    accept_commands_from: Vec<OwnedUserId>,
 }
 
 impl BotConfig {
@@ -38,12 +39,14 @@ impl BotConfig {
         homeserver_url: String,
         ignore_own_messages: bool,
         autojoin: bool,
+        accept_commands_from: Vec<OwnedUserId>,
     ) -> Self {
         Self {
             login_data,
             homeserver_url,
             ignore_own_messages,
             autojoin,
+            accept_commands_from,
         }
     }
 }
@@ -105,8 +108,24 @@ async fn main() -> anyhow::Result<()> {
     let sleep_time_in_minutes = settings
         .get_int("config.sleep_time_in_minutes")
         .unwrap_or(60) as u64;
+    let accept_commands_from_str: Vec<String> = settings
+        .get_array("config.accept_commands_from")
+        .unwrap_or_default()
+        .into_iter()
+        .map(|x| x.into_string())
+        .collect::<Result<Vec<_>, _>>()?;
+    let accept_commands_from = accept_commands_from_str
+        .into_iter()
+        .map(UserId::parse)
+        .collect::<Result<Vec<_>, _>>()?;
     // -------------------------------------------------------
-    let botconfig = BotConfig::new(login_data, homeserver_url, ignore_own_messages, autojoin);
+    let botconfig = BotConfig::new(
+        login_data,
+        homeserver_url,
+        ignore_own_messages,
+        autojoin,
+        accept_commands_from,
+    );
     let shared_state = SharedState::new(botconfig);
     let mut sources = [
         MozData::new("firefox/candidates", Some("esr"), true),

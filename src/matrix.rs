@@ -27,20 +27,24 @@ async fn on_room_message(
             println!("Skipping message from ourselves.");
             return Ok(());
         }
-        if let MessageType::Text(TextMessageEventContent { body, .. }) = event.content.msgtype {
-            if body == "!ping" {
-                let content = RoomMessageEventContent::text_plain("pong");
-                room.send(content, None).await?;
-            }
-            if body == "!leave" {
-                let content = RoomMessageEventContent::text_plain("Bye");
-                room.send(content, None).await?;
-                room.leave().await?;
-            }
-            if body == "!watch" {
-                let content = RoomMessageEventContent::text_plain("Watching...");
-                room.send(content, None).await?;
-                ctx.rooms.lock().unwrap().insert(room.room_id().to_owned());
+        if ctx.cfg.accept_commands_from.is_empty()
+            || ctx.cfg.accept_commands_from.contains(&event.sender)
+        {
+            if let MessageType::Text(TextMessageEventContent { body, .. }) = event.content.msgtype {
+                if body == "!ping" {
+                    let content = RoomMessageEventContent::text_plain("pong");
+                    room.send(content, None).await?;
+                }
+                if body == "!leave" {
+                    let content = RoomMessageEventContent::text_plain("Bye");
+                    room.send(content, None).await?;
+                    room.leave().await?;
+                }
+                if body == "!watch" {
+                    let content = RoomMessageEventContent::text_plain("Watching...");
+                    room.send(content, None).await?;
+                    ctx.rooms.lock().unwrap().insert(room.room_id().to_owned());
+                }
             }
         }
     }
