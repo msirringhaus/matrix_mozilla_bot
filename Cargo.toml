@@ -3,8 +3,6 @@ name = "matrix_mozilla_bot"
 version = "0.1.0"
 edition = "2021"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
 [dependencies]
 anyhow = "1.0"
 config = "^0.13"
@@ -14,3 +12,6 @@ scraper = { version = "^0.14", default-features=false }
 tokio = { version = "1.25.0", features = ["macros", "rt-multi-thread"] }
 tracing-subscriber = "^0.3"
 rpassword = "5.0"
+
+[features]
+sso-login = ["matrix-sdk/sso-login"]

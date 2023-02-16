@@ -15,10 +15,13 @@ use matrix::login_and_sync;
 mod mozilla;
 use mozilla::MozData;
 
+#[allow(unused)]
 #[derive(Debug, Clone)]
 enum LoginData {
     UsernamePassword(String, String),
     Session(String, String),
+    #[cfg(feature = "sso-login")]
+    Sso,
 }
 
 #[derive(Debug, Clone)]
@@ -75,21 +78,26 @@ async fn main() -> anyhow::Result<()> {
         .build()?;
 
     let homeserver_url = settings.get_string("login.homeserver_url")?;
-    let use_session = settings.get_bool("login.use_session").unwrap_or(false);
-    let username = settings.get_string("login.username")?;
-    let password = match settings.get_string("login.password") {
-        Ok(pw) => pw,
-        Err(..) => {
-            rpassword::prompt_password_stderr("Enter Password: ").expect("Failed to read password")
+
+    #[cfg(feature = "sso-login")]
+    let login_data = LoginData::Sso;
+    #[cfg(not(feature = "sso-login"))]
+    let login_data = {
+        let username = settings.get_string("login.username")?;
+        let password = match settings.get_string("login.password") {
+            Ok(pw) => pw,
+            Err(..) => rpassword::prompt_password_stderr("Enter Password: ")
+                .expect("Failed to read password"),
+        };
+        let use_session = settings.get_bool("login.use_session").unwrap_or(false);
+        // If use_session is true, the "password" is really the session-token
+        if use_session {
+            LoginData::Session(username, password)
+        } else {
+            LoginData::UsernamePassword(username, password)
         }
     };
-    // If use_session is true, the "password" is really the session-token
-    let login_data = if use_session {
-        LoginData::Session(username, password)
-    } else {
-        LoginData::UsernamePassword(username, password)
-    };
-    // // Currently not really used, but I leave it here in case we need it at some point
+    // Currently not really used, but I leave it here in case we need it at some point
     let ignore_own_messages = settings
         .get_bool("config.ignore_own_messages")
         .unwrap_or(true);

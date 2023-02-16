@@ -116,6 +116,24 @@ pub async fn login_and_sync(aio: SharedState) -> anyhow::Result<Client> {
             client.restore_login(session).await?;
             println!("logged in with token");
         }
+        #[cfg(feature = "sso-login")]
+        LoginData::Sso => {
+            let response = client
+                .login_sso(|sso_url| async move {
+                    // Open sso_url
+                    println!("{sso_url}");
+                    Ok(())
+                })
+                .initial_device_display_name("My app")
+                .send()
+                .await
+                .unwrap();
+
+            println!(
+                "Logged in as {}, got device_id {} and access_token {}",
+                response.user_id, response.device_id, response.access_token
+            );
+        }
     }
 
     // An initial sync to set up state and so our bot doesn't respond to old
