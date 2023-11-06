@@ -9,9 +9,8 @@ use matrix_sdk::{
             MessageType, OriginalSyncRoomMessageEvent, RoomMessageEventContent,
             TextMessageEventContent,
         },
-        ServerName, UserId,
     },
-    Client, Session,
+    Client, RoomState,
 };
 use tokio::time::{sleep, Duration};
 
@@ -21,7 +20,7 @@ async fn on_room_message(
     client: Client,
     ctx: Ctx<SharedState>,
 ) -> anyhow::Result<()> {
-    if let Room::Joined(room) = room {
+    if room.state() == RoomState::Joined {
         if ctx.cfg.ignore_own_messages && Some(event.sender.as_ref()) == client.user_id() {
             // Our own message, skipping.
             println!("Skipping message from ourselves.");
@@ -33,16 +32,16 @@ async fn on_room_message(
             if let MessageType::Text(TextMessageEventContent { body, .. }) = event.content.msgtype {
                 if body == "!ping" {
                     let content = RoomMessageEventContent::text_plain("pong");
-                    room.send(content, None).await?;
+                    room.send(content).await?;
                 }
                 if body == "!leave" {
                     let content = RoomMessageEventContent::text_plain("Bye");
-                    room.send(content, None).await?;
+                    room.send(content).await?;
                     room.leave().await?;
                 }
                 if body == "!watch" {
                     let content = RoomMessageEventContent::text_plain("Watching...");
-                    room.send(content, None).await?;
+                    room.send(content).await?;
                     ctx.rooms.lock().unwrap().insert(room.room_id().to_owned());
                 }
             }
@@ -61,7 +60,7 @@ async fn on_stripped_state_member(
         return;
     }
 
-    if let Room::Invited(room) = room {
+    if room.state() == RoomState::Invited {
         tokio::spawn(async move {
             if ctx.cfg.accept_commands_from.is_empty()
                 || ctx.cfg.accept_commands_from.contains(&room_member.sender)
@@ -69,7 +68,7 @@ async fn on_stripped_state_member(
                 println!("Autojoining room {}", room.room_id());
                 let mut delay = 2;
 
-                while let Err(err) = room.accept_invitation().await {
+                while let Err(err) = room.join().await {
                     // retry autojoin due to synapse sending invites, before the
                     // invited user can join for more information see
                     // https://github.com/matrix-org/synapse/issues/4345
@@ -90,7 +89,7 @@ async fn on_stripped_state_member(
             } else {
                 println!("Rejecting invite to room {}", room.room_id());
                 let mut delay = 2;
-                while let Err(err) = room.reject_invitation().await {
+                while let Err(err) = room.leave().await {
                     // retry autojoin due to synapse sending invites, before the
                     // invited user can join for more information see
                     // https://github.com/matrix-org/synapse/issues/4345
@@ -124,34 +123,17 @@ pub async fn login_and_sync(aio: SharedState) -> anyhow::Result<Client> {
     match &aio.cfg.login_data {
         LoginData::UsernamePassword(username, password) => {
             client
+                .matrix_auth()
                 .login_username(username, password)
                 .initial_device_display_name("Mozilla bot")
                 .send()
                 .await?;
             println!("logged in as {}", username);
         }
-        LoginData::Session(username, token) => {
-            let session = Session {
-                access_token: token.to_owned(),
-                refresh_token: None,
-                user_id: UserId::parse_with_server_name(
-                    username.clone(),
-                    &ServerName::parse(
-                        client
-                            .homeserver()
-                            .await
-                            .host_str()
-                            .expect("Homeserver-URL has no host"),
-                    )?,
-                )?,
-                device_id: "MOWAUSSCTB".into(),
-            };
-            client.restore_login(session).await?;
-            println!("logged in with token");
-        }
         #[cfg(feature = "sso-login")]
         LoginData::Sso => {
             let response = client
+                .matrix_auth()
                 .login_sso(|sso_url| async move {
                     // Open sso_url
                     println!("{sso_url}");

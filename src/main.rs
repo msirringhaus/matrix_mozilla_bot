@@ -1,7 +1,7 @@
 use config::{Config, ConfigError, Value};
 use matrix_sdk::{
-    room::Room,
     ruma::{events::room::message::RoomMessageEventContent, OwnedRoomId, OwnedUserId, UserId},
+    RoomState,
 };
 use regex::Regex;
 use std::{
@@ -20,7 +20,6 @@ use mozilla::MozData;
 #[derive(Debug, Clone)]
 enum LoginData {
     UsernamePassword(String, String),
-    Session(String, String),
     #[cfg(feature = "sso-login")]
     Sso,
 }
@@ -93,13 +92,7 @@ async fn main() -> anyhow::Result<()> {
             Err(..) => rpassword::prompt_password_stderr("Enter Password: ")
                 .expect("Failed to read password"),
         };
-        let use_session = settings.get_bool("login.use_session").unwrap_or(false);
-        // If use_session is true, the "password" is really the session-token
-        if use_session {
-            LoginData::Session(username, password)
-        } else {
-            LoginData::UsernamePassword(username, password)
-        }
+        LoginData::UsernamePassword(username, password)
     };
     // Currently not really used, but I leave it here in case we need it at some point
     let ignore_own_messages = settings
@@ -171,7 +164,10 @@ async fn main() -> anyhow::Result<()> {
                     .collect();
 
                 for roomid in roomids {
-                    if let Some(Room::Joined(room)) = client.get_room(&roomid) {
+                    if let Some(room) = client.get_room(&roomid) {
+                        if room.state() != RoomState::Joined {
+                            continue;
+                        }
                         let content = RoomMessageEventContent::text_html(
                             &format!("{} got new uploads: {}", source.url_part, answer_str),
                             &format!(
@@ -179,7 +175,7 @@ async fn main() -> anyhow::Result<()> {
                                 source.base_url, source.url_part, source.url_part, answer_str
                             ),
                         );
-                        room.send(content, None).await?;
+                        room.send(content).await?;
                     }
                 }
             }
