@@ -2,6 +2,7 @@ use super::{LoginData, SharedState};
 use matrix_sdk::{
     config::SyncSettings,
     event_handler::Ctx,
+    matrix_auth::MatrixSession,
     room::Room,
     ruma::{
         events::room::member::StrippedRoomMemberEvent,
@@ -12,6 +13,8 @@ use matrix_sdk::{
     },
     Client, RoomState,
 };
+use std::path::Path;
+use tokio::fs;
 use tokio::time::{sleep, Duration};
 
 async fn on_room_message(
@@ -115,17 +118,27 @@ async fn on_stripped_state_member(
     }
 }
 
-pub async fn login_and_sync(aio: SharedState) -> anyhow::Result<Client> {
-    #[allow(unused_mut)]
-    let mut client_builder = Client::builder().homeserver_url(aio.cfg.homeserver_url.clone());
+/// Restore a previous session.
+pub async fn restore_session(client: &Client, session_file: &Path) -> anyhow::Result<()> {
+    // The session was serialized as JSON in a file.
+    let serialized_session = fs::read_to_string(session_file).await?;
+    let user_session: MatrixSession = serde_json::from_str(&serialized_session)?;
 
-    let client = client_builder.build().await?;
+    println!("Restoring session for {}…", user_session.meta.user_id);
+
+    // Restore the Matrix user session.
+    client.restore_session(user_session).await?;
+
+    Ok(())
+}
+
+pub async fn login(client: &Client, aio: &SharedState) -> anyhow::Result<()> {
     match &aio.cfg.login_data {
         LoginData::UsernamePassword(username, password) => {
             client
                 .matrix_auth()
                 .login_username(username, password)
-                .initial_device_display_name("Mozilla bot")
+                .initial_device_display_name("Mozilla FTP watcher")
                 .send()
                 .await?;
             println!("logged in as {}", username);
@@ -139,7 +152,7 @@ pub async fn login_and_sync(aio: SharedState) -> anyhow::Result<Client> {
                     println!("{sso_url}");
                     Ok(())
                 })
-                .initial_device_display_name("My app")
+                .initial_device_display_name("Mozilla FTP watcher")
                 .send()
                 .await
                 .unwrap();
@@ -148,6 +161,40 @@ pub async fn login_and_sync(aio: SharedState) -> anyhow::Result<Client> {
                 "Logged in as {}, got device_id {} and access_token {}",
                 response.user_id, response.device_id, response.access_token
             );
+        }
+    }
+    Ok(())
+}
+
+pub async fn login_and_sync(aio: SharedState) -> anyhow::Result<Client> {
+    let mut client_builder = Client::builder().homeserver_url(aio.cfg.homeserver_url.clone());
+    if let Some(db) = &aio.cfg.session_storage.get_session_db() {
+        client_builder = client_builder.sqlite_store(&db.db_path, Some(&db.db_pw));
+    }
+
+    let client = client_builder.build().await?;
+    let mut logged_in = false;
+    if aio.cfg.session_storage.session_store_exists() {
+        logged_in = restore_session(
+            &client,
+            &aio.cfg.session_storage.get_session_store().unwrap(),
+        )
+        .await
+        .is_ok();
+    }
+
+    if !logged_in {
+        login(&client, &aio).await?;
+        match &aio.cfg.session_storage {
+            crate::SessionStorage::Ephemeral => todo!(),
+            crate::SessionStorage::Plain(_, session) => {
+                let user_session = client
+                    .matrix_auth()
+                    .session()
+                    .expect("A logged-in client should have a session");
+                let serialized_session = serde_json::to_string(&user_session)?;
+                fs::write(&session.session_path, serialized_session).await?;
+            }
         }
     }
 

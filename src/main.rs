@@ -6,6 +6,7 @@ use matrix_sdk::{
 use regex::Regex;
 use std::{
     collections::HashSet,
+    path::PathBuf,
     sync::{Arc, Mutex},
 };
 use tokio::time::{sleep, Duration};
@@ -25,9 +26,52 @@ enum LoginData {
 }
 
 #[derive(Debug, Clone)]
+pub struct SessionDB {
+    db_path: PathBuf, // TODO: Make this an enum and add more storage-backends
+    db_pw: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct PlainSessionStorage {
+    session_path: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+pub enum SessionStorage {
+    Ephemeral,
+    Plain(SessionDB, PlainSessionStorage),
+}
+
+impl SessionStorage {
+    fn session_store_exists(&self) -> bool {
+        match self {
+            SessionStorage::Ephemeral => false,
+            SessionStorage::Plain(db, session) => {
+                db.db_path.exists() && session.session_path.exists()
+            }
+        }
+    }
+
+    fn get_session_store(&self) -> Option<PathBuf> {
+        match self {
+            SessionStorage::Ephemeral => None,
+            SessionStorage::Plain(_, session) => Some(session.session_path.clone()),
+        }
+    }
+
+    fn get_session_db(&self) -> Option<SessionDB> {
+        match self {
+            SessionStorage::Ephemeral => None,
+            SessionStorage::Plain(db, _) => Some(db.clone()),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 struct BotConfig {
     login_data: LoginData,
     homeserver_url: String,
+    session_storage: SessionStorage,
     ignore_own_messages: bool,
     autojoin: bool,
     accept_commands_from: Vec<OwnedUserId>,
@@ -37,6 +81,7 @@ impl BotConfig {
     fn new(
         login_data: LoginData,
         homeserver_url: String,
+        session_storage: SessionStorage,
         ignore_own_messages: bool,
         autojoin: bool,
         accept_commands_from: Vec<OwnedUserId>,
@@ -44,6 +89,7 @@ impl BotConfig {
         Self {
             login_data,
             homeserver_url,
+            session_storage,
             ignore_own_messages,
             autojoin,
             accept_commands_from,
@@ -66,6 +112,42 @@ impl SharedState {
     }
 }
 
+fn extract_session_storage(settings: &Config) -> anyhow::Result<SessionStorage> {
+    if !settings.get_bool("login.persist_session").unwrap_or(true) {
+        return Ok(SessionStorage::Ephemeral);
+    }
+
+    let db_path = if let Ok(db_storage) = settings.get_string("login.db_path") {
+        PathBuf::from(db_storage)
+    } else {
+        dirs::data_dir()
+            .unwrap_or(PathBuf::from("./"))
+            .join("matrix_mozilla_bot")
+            .join("session")
+    };
+    let db_pw = if let Ok(db_pw) = settings.get_string("login.db_pw") {
+        db_pw
+    } else {
+        rpassword::prompt_password_stderr(&format!(
+            "Enter Session storage ({}) password: ",
+            db_path.to_string_lossy()
+        ))?
+    };
+    let session_path = if let Ok(session_path) = settings.get_string("login.session_path") {
+        PathBuf::from(session_path)
+    } else {
+        dirs::data_dir()
+            .unwrap_or(PathBuf::from("./"))
+            .join("matrix_mozilla_bot")
+            .join("session")
+            .join("session.dump")
+    };
+    Ok(SessionStorage::Plain(
+        SessionDB { db_path, db_pw },
+        PlainSessionStorage { session_path },
+    ))
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // ------- Getting the login-credentials from file ------
@@ -81,7 +163,7 @@ async fn main() -> anyhow::Result<()> {
         .build()?;
 
     let homeserver_url = settings.get_string("login.homeserver_url")?;
-
+    let session_storage = extract_session_storage(&settings)?;
     #[cfg(feature = "sso-login")]
     let login_data = LoginData::Sso;
     #[cfg(not(feature = "sso-login"))]
@@ -89,8 +171,15 @@ async fn main() -> anyhow::Result<()> {
         let username = settings.get_string("login.username")?;
         let password = match settings.get_string("login.password") {
             Ok(pw) => pw,
-            Err(..) => rpassword::prompt_password_stderr("Enter Password: ")
-                .expect("Failed to read password"),
+            Err(..) => {
+                // We don't need a login-password, if we can restore the session from disk
+                if session_storage.session_store_exists() {
+                    String::new()
+                } else {
+                    rpassword::prompt_password_stderr("Enter Password: ")
+                        .expect("Failed to read password")
+                }
+            }
         };
         LoginData::UsernamePassword(username, password)
     };
@@ -139,6 +228,7 @@ async fn main() -> anyhow::Result<()> {
     let botconfig = BotConfig::new(
         login_data,
         homeserver_url,
+        session_storage,
         ignore_own_messages,
         autojoin,
         accept_commands_from,
