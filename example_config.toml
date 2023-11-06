@@ -2,6 +2,16 @@
 username = "username"
 password = "password"
 homeserver_url = "https://chat.example.com"
+# Optional. Defaults to true
+# persist_storage = true
+# Optional. Defaults to $XDG_DATA_DIR/matrix_mozilla_bot/session,
+# or ./matrix_mozilla_bot/session on weird platforms where `dirs` can't find a data-dir
+# db_path = "/somewhere/far/away"
+# Optional. You get prompted on startup, if this is omitted.
+# db_pw = "something very secret"
+# Optional. Default to db_path/session.dump
+# NOTE: This is very insecure, as your session-token gets saved plain-text
+# session_path = "/somewhere/more/secretive/"
 
 [config]
 ignore_own_messages = true

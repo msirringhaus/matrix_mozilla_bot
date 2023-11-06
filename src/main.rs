@@ -136,11 +136,7 @@ fn extract_session_storage(settings: &Config) -> anyhow::Result<SessionStorage> 
     let session_path = if let Ok(session_path) = settings.get_string("login.session_path") {
         PathBuf::from(session_path)
     } else {
-        dirs::data_dir()
-            .unwrap_or(PathBuf::from("./"))
-            .join("matrix_mozilla_bot")
-            .join("session")
-            .join("session.dump")
+        db_path.join("session.dump")
     };
     Ok(SessionStorage::Plain(
         SessionDB { db_path, db_pw },
