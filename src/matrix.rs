@@ -47,6 +47,16 @@ macro_rules! get_from_secret_service {
     };
 }
 
+async fn update_room_cache(ctx: &Ctx<SharedState>) -> anyhow::Result<()> {
+    if let Some(db) = ctx.cfg.session_storage.get_session_db() {
+        if db.db_path.exists() {
+            let serialized_rooms = serde_json::to_string(&*ctx.rooms.lock().unwrap())?;
+            fs::write(&db.db_path.join("watched_rooms"), serialized_rooms).await?;
+        }
+    }
+    Ok(())
+}
+
 async fn on_room_message(
     event: OriginalSyncRoomMessageEvent,
     room: Room,
@@ -71,11 +81,14 @@ async fn on_room_message(
                     let content = RoomMessageEventContent::text_plain("Bye");
                     room.send(content).await?;
                     room.leave().await?;
+                    ctx.rooms.lock().unwrap().remove(room.room_id());
+                    update_room_cache(&ctx).await?;
                 }
                 if body == "!watch" {
                     let content = RoomMessageEventContent::text_plain("Watching...");
                     room.send(content).await?;
                     ctx.rooms.lock().unwrap().insert(room.room_id().to_owned());
+                    update_room_cache(&ctx).await?;
                 }
             }
         }

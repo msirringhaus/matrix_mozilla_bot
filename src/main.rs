@@ -10,7 +10,10 @@ use std::{
     path::PathBuf,
     sync::{Arc, Mutex},
 };
-use tokio::time::{sleep, Duration};
+use tokio::{
+    fs,
+    time::{sleep, Duration},
+};
 
 mod matrix;
 use matrix::login_and_sync;
@@ -234,7 +237,15 @@ async fn main() -> anyhow::Result<()> {
         autojoin,
         accept_commands_from,
     );
-    let shared_state = SharedState::new(botconfig);
+    let mut shared_state = SharedState::new(botconfig);
+
+    if let Some(db) = &shared_state.cfg.session_storage.get_session_db() {
+        let watched_files = db.db_path.join("watched_rooms");
+        if watched_files.exists() {
+            let serialized_session = fs::read_to_string(&watched_files).await?;
+            shared_state.rooms = serde_json::from_str(&serialized_session)?;
+        }
+    }
 
     let client = login_and_sync(shared_state.clone()).await?;
 
