@@ -9,6 +9,8 @@ homeserver_url = "https://chat.example.com"
 # db_path = "/somewhere/far/away"
 # Optional. You get prompted on startup, if this is omitted.
 # db_pw = "something very secret"
+# Optional. Defaults to true. If this is set to true, session_path is ignored.
+# use_secret_service = false
 # Optional. Default to db_path/session.dump
 # NOTE: This is very insecure, as your session-token gets saved plain-text
 # session_path = "/somewhere/more/secretive/"

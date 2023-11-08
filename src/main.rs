@@ -4,6 +4,7 @@ use matrix_sdk::{
     RoomState,
 };
 use regex::Regex;
+use secret_service::{blocking, EncryptionType};
 use std::{
     collections::HashSet,
     path::PathBuf,
@@ -40,6 +41,7 @@ pub struct PlainSessionStorage {
 pub enum SessionStorage {
     Ephemeral,
     Plain(SessionDB, PlainSessionStorage),
+    SecretService(SessionDB),
 }
 
 impl SessionStorage {
@@ -49,20 +51,16 @@ impl SessionStorage {
             SessionStorage::Plain(db, session) => {
                 db.db_path.exists() && session.session_path.exists()
             }
-        }
-    }
-
-    fn get_session_store(&self) -> Option<PathBuf> {
-        match self {
-            SessionStorage::Ephemeral => None,
-            SessionStorage::Plain(_, session) => Some(session.session_path.clone()),
+            SessionStorage::SecretService(db) => {
+                db.db_path.exists() && blocking::SecretService::connect(EncryptionType::Dh).is_ok()
+            }
         }
     }
 
     fn get_session_db(&self) -> Option<SessionDB> {
         match self {
             SessionStorage::Ephemeral => None,
-            SessionStorage::Plain(db, _) => Some(db.clone()),
+            SessionStorage::Plain(db, _) | SessionStorage::SecretService(db) => Some(db.clone()),
         }
     }
 }
@@ -133,15 +131,22 @@ fn extract_session_storage(settings: &Config) -> anyhow::Result<SessionStorage> 
             db_path.to_string_lossy()
         ))?
     };
-    let session_path = if let Ok(session_path) = settings.get_string("login.session_path") {
-        PathBuf::from(session_path)
+    if !settings
+        .get_bool("login.use_secret_service")
+        .unwrap_or(true)
+    {
+        let session_path = if let Ok(session_path) = settings.get_string("login.session_path") {
+            PathBuf::from(session_path)
+        } else {
+            db_path.join("session.dump")
+        };
+        Ok(SessionStorage::Plain(
+            SessionDB { db_path, db_pw },
+            PlainSessionStorage { session_path },
+        ))
     } else {
-        db_path.join("session.dump")
-    };
-    Ok(SessionStorage::Plain(
-        SessionDB { db_path, db_pw },
-        PlainSessionStorage { session_path },
-    ))
+        Ok(SessionStorage::SecretService(SessionDB { db_path, db_pw }))
+    }
 }
 
 #[tokio::main]

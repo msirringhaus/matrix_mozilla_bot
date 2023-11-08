@@ -2,7 +2,7 @@ use super::{LoginData, SharedState};
 use matrix_sdk::{
     config::SyncSettings,
     event_handler::Ctx,
-    matrix_auth::MatrixSession,
+    matrix_auth::{MatrixSession, MatrixSessionTokens},
     room::Room,
     ruma::{
         events::room::member::StrippedRoomMemberEvent,
@@ -10,12 +10,42 @@ use matrix_sdk::{
             MessageType, OriginalSyncRoomMessageEvent, RoomMessageEventContent,
             TextMessageEventContent,
         },
+        OwnedDeviceId, OwnedUserId,
     },
-    Client, RoomState,
+    Client, RoomState, SessionMeta,
 };
-use std::path::Path;
+use secret_service::{EncryptionType, SecretService};
+use std::{collections::HashMap, path::Path};
 use tokio::fs;
 use tokio::time::{sleep, Duration};
+
+macro_rules! store_to_secret_service {
+    ($collection:expr, $name:expr, $data:expr) => {
+        $collection
+            .create_item(
+                "matrix_mozilla_bot",
+                HashMap::from([("matrix_mozilla_bot", $name)]),
+                $data,
+                true, // replace item with same attributes
+                "text/plain",
+            )
+            .await?;
+    };
+}
+
+macro_rules! get_from_secret_service {
+    ($collection:expr, $name:expr) => {
+        String::from_utf8(
+            $collection
+                .search_items(HashMap::from([("matrix_mozilla_bot", $name)]))
+                .await?
+                .get(0)
+                .ok_or(secret_service::Error::NoResult)?
+                .get_secret()
+                .await?,
+        )?
+    };
+}
 
 async fn on_room_message(
     event: OriginalSyncRoomMessageEvent,
@@ -118,12 +148,55 @@ async fn on_stripped_state_member(
     }
 }
 
-/// Restore a previous session.
-pub async fn restore_session(client: &Client, session_file: &Path) -> anyhow::Result<()> {
+/// Restore a previous session from plain storage.
+pub async fn restore_plain_session(client: &Client, session_file: &Path) -> anyhow::Result<()> {
     // The session was serialized as JSON in a file.
     let serialized_session = fs::read_to_string(session_file).await?;
     let user_session: MatrixSession = serde_json::from_str(&serialized_session)?;
 
+    println!("Restoring session for {}…", user_session.meta.user_id);
+
+    // Restore the Matrix user session.
+    client.restore_session(user_session).await?;
+
+    Ok(())
+}
+
+/// Restore a previous session via SecretService.
+pub async fn restore_ss_session(client: &Client) -> anyhow::Result<()> {
+    let ss = SecretService::connect(EncryptionType::Dh).await?;
+    let collection = ss.get_default_collection().await?;
+    let access_token = get_from_secret_service!(collection, "access_token");
+    let device_id = get_from_secret_service!(collection, "device_id");
+    let user_id = get_from_secret_service!(collection, "user_id");
+    let refresh_token = if let Ok(tokens) = collection
+        .search_items(HashMap::from([("name", "refresh_token")]))
+        .await
+    {
+        if tokens.is_empty() {
+            None
+        } else {
+            tokens[0]
+                .get_secret()
+                .await
+                .map(|x| String::from_utf8(x).ok())
+                .ok()
+                .flatten()
+        }
+    } else {
+        None
+    };
+
+    let user_session = MatrixSession {
+        meta: SessionMeta {
+            user_id: OwnedUserId::try_from(user_id)?,
+            device_id: OwnedDeviceId::try_from(device_id)?,
+        },
+        tokens: MatrixSessionTokens {
+            access_token,
+            refresh_token,
+        },
+    };
     println!("Restoring session for {}…", user_session.meta.user_id);
 
     // Restore the Matrix user session.
@@ -173,20 +246,20 @@ pub async fn login_and_sync(aio: SharedState) -> anyhow::Result<Client> {
     }
 
     let client = client_builder.build().await?;
-    let mut logged_in = false;
-    if aio.cfg.session_storage.session_store_exists() {
-        logged_in = restore_session(
-            &client,
-            &aio.cfg.session_storage.get_session_store().unwrap(),
-        )
-        .await
-        .is_ok();
-    }
+    let logged_in = match &aio.cfg.session_storage {
+        crate::SessionStorage::Ephemeral => false, // Nothing to restore
+        crate::SessionStorage::Plain(_, session) => {
+            restore_plain_session(&client, &session.session_path)
+                .await
+                .is_ok()
+        }
+        crate::SessionStorage::SecretService(_) => restore_ss_session(&client).await.is_ok(),
+    };
 
     if !logged_in {
         login(&client, &aio).await?;
         match &aio.cfg.session_storage {
-            crate::SessionStorage::Ephemeral => todo!(),
+            crate::SessionStorage::Ephemeral => (),
             crate::SessionStorage::Plain(_, session) => {
                 let user_session = client
                     .matrix_auth()
@@ -194,6 +267,42 @@ pub async fn login_and_sync(aio: SharedState) -> anyhow::Result<Client> {
                     .expect("A logged-in client should have a session");
                 let serialized_session = serde_json::to_string(&user_session)?;
                 fs::write(&session.session_path, serialized_session).await?;
+            }
+            crate::SessionStorage::SecretService(..) => {
+                let user_session = client
+                    .matrix_auth()
+                    .session()
+                    .expect("A logged-in client should have a session");
+                let ss = SecretService::connect(EncryptionType::Dh).await?;
+                let collection = match ss.get_default_collection().await {
+                    Ok(c) => c,
+                    Err(secret_service::Error::NoResult) => {
+                        ss.create_collection("matrix_mozilla_bot", "matrix_mozilla_bot")
+                            .await?
+                    }
+                    Err(x) => {
+                        return Err(x.into());
+                    }
+                };
+
+                if let Some(refresh_token) = user_session.tokens.refresh_token {
+                    store_to_secret_service!(collection, "refresh_token", refresh_token.as_bytes());
+                }
+                store_to_secret_service!(
+                    collection,
+                    "access_token",
+                    user_session.tokens.access_token.as_bytes()
+                );
+                store_to_secret_service!(
+                    collection,
+                    "user_id",
+                    user_session.meta.user_id.as_bytes()
+                );
+                store_to_secret_service!(
+                    collection,
+                    "device_id",
+                    user_session.meta.device_id.as_bytes()
+                );
             }
         }
     }
