@@ -5,6 +5,7 @@ use matrix_sdk::{
     matrix_auth::{MatrixSession, MatrixSessionTokens},
     room::Room,
     ruma::{
+        api::client::filter::FilterDefinition,
         events::room::member::StrippedRoomMemberEvent,
         events::room::message::{
             MessageType, OriginalSyncRoomMessageEvent, RoomMessageEventContent,
@@ -15,6 +16,7 @@ use matrix_sdk::{
     Client, RoomState, SessionMeta,
 };
 use secret_service::{EncryptionType, SecretService};
+use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, path::Path};
 use tokio::fs;
 use tokio::time::{sleep, Duration};
@@ -44,6 +46,28 @@ macro_rules! get_from_secret_service {
                 .get_secret()
                 .await?,
         )?
+    };
+}
+
+macro_rules! get_optional_from_secret_service {
+    ($collection:expr, $name:expr) => {
+        if let Ok(tokens) = $collection
+            .search_items(HashMap::from([("name", $name)]))
+            .await
+        {
+            // Can't use .map() here, because of async-weirdness
+            if let Some(t) = tokens.get(0) {
+                t.get_secret()
+                    .await
+                    .map(|x| String::from_utf8(x).ok())
+                    .ok()
+                    .flatten()
+            } else {
+                None
+            }
+        } else {
+            None
+        }
     };
 }
 
@@ -161,44 +185,41 @@ async fn on_stripped_state_member(
     }
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct PlainMatrixSession {
+    user_session: MatrixSession,
+    sync_token: Option<String>,
+}
+
 /// Restore a previous session from plain storage.
-pub async fn restore_plain_session(client: &Client, session_file: &Path) -> anyhow::Result<()> {
+pub async fn restore_plain_session(
+    client: &Client,
+    session_file: &Path,
+) -> anyhow::Result<Option<String>> {
     // The session was serialized as JSON in a file.
     let serialized_session = fs::read_to_string(session_file).await?;
-    let user_session: MatrixSession = serde_json::from_str(&serialized_session)?;
+    let session: PlainMatrixSession = serde_json::from_str(&serialized_session)?;
 
-    println!("Restoring session for {}…", user_session.meta.user_id);
+    println!(
+        "Restoring session for {}…",
+        session.user_session.meta.user_id
+    );
 
     // Restore the Matrix user session.
-    client.restore_session(user_session).await?;
+    client.restore_session(session.user_session).await?;
 
-    Ok(())
+    Ok(session.sync_token)
 }
 
 /// Restore a previous session via SecretService.
-pub async fn restore_ss_session(client: &Client) -> anyhow::Result<()> {
+pub async fn restore_ss_session(client: &Client) -> anyhow::Result<Option<String>> {
     let ss = SecretService::connect(EncryptionType::Dh).await?;
     let collection = ss.get_default_collection().await?;
     let access_token = get_from_secret_service!(collection, "access_token");
     let device_id = get_from_secret_service!(collection, "device_id");
     let user_id = get_from_secret_service!(collection, "user_id");
-    let refresh_token = if let Ok(tokens) = collection
-        .search_items(HashMap::from([("name", "refresh_token")]))
-        .await
-    {
-        if tokens.is_empty() {
-            None
-        } else {
-            tokens[0]
-                .get_secret()
-                .await
-                .map(|x| String::from_utf8(x).ok())
-                .ok()
-                .flatten()
-        }
-    } else {
-        None
-    };
+    let refresh_token = get_optional_from_secret_service!(collection, "refresh_token");
+    let sync_token = get_optional_from_secret_service!(collection, "sync_token");
 
     let user_session = MatrixSession {
         meta: SessionMeta {
@@ -215,7 +236,7 @@ pub async fn restore_ss_session(client: &Client) -> anyhow::Result<()> {
     // Restore the Matrix user session.
     client.restore_session(user_session).await?;
 
-    Ok(())
+    Ok(sync_token)
 }
 
 pub async fn login(client: &Client, aio: &SharedState) -> anyhow::Result<()> {
@@ -259,71 +280,117 @@ pub async fn login_and_sync(aio: SharedState) -> anyhow::Result<Client> {
     }
 
     let client = client_builder.build().await?;
-    let logged_in = match &aio.cfg.session_storage {
-        crate::SessionStorage::Ephemeral => false, // Nothing to restore
+    let (logged_in, sync_token) = match &aio.cfg.session_storage {
+        crate::SessionStorage::Ephemeral => (false, None), // Nothing to restore
         crate::SessionStorage::Plain(_, session) => {
-            restore_plain_session(&client, &session.session_path)
-                .await
-                .is_ok()
+            if let Ok(sync_token) = restore_plain_session(&client, &session.session_path).await {
+                (true, sync_token)
+            } else {
+                (false, None)
+            }
         }
-        crate::SessionStorage::SecretService(_) => restore_ss_session(&client).await.is_ok(),
+        crate::SessionStorage::SecretService(_) => {
+            if let Ok(sync_token) = restore_ss_session(&client).await {
+                (true, sync_token)
+            } else {
+                (false, None)
+            }
+        }
     };
 
     if !logged_in {
         login(&client, &aio).await?;
-        match &aio.cfg.session_storage {
-            crate::SessionStorage::Ephemeral => (),
-            crate::SessionStorage::Plain(_, session) => {
-                let user_session = client
-                    .matrix_auth()
-                    .session()
-                    .expect("A logged-in client should have a session");
-                let serialized_session = serde_json::to_string(&user_session)?;
-                fs::write(&session.session_path, serialized_session).await?;
-            }
-            crate::SessionStorage::SecretService(..) => {
-                let user_session = client
-                    .matrix_auth()
-                    .session()
-                    .expect("A logged-in client should have a session");
-                let ss = SecretService::connect(EncryptionType::Dh).await?;
-                let collection = match ss.get_default_collection().await {
-                    Ok(c) => c,
-                    Err(secret_service::Error::NoResult) => {
-                        ss.create_collection("matrix_mozilla_bot", "matrix_mozilla_bot")
-                            .await?
-                    }
-                    Err(x) => {
-                        return Err(x.into());
-                    }
-                };
+    }
 
-                if let Some(refresh_token) = user_session.tokens.refresh_token {
-                    store_to_secret_service!(collection, "refresh_token", refresh_token.as_bytes());
+    let filter = FilterDefinition::with_lazy_loading();
+    let mut sync_settings = SyncSettings::default().filter(filter.into());
+
+    // We restore the sync where we left.
+    // This is not necessary when not using `sync_once`. The other sync methods get
+    // the sync token from the store.
+    if let Some(sync_token) = sync_token {
+        sync_settings = sync_settings.token(sync_token);
+    }
+    // Let's ignore messages before the program was launched.
+    // This is a loop in case the initial sync is longer than our timeout. The
+    // server should cache the response and it will ultimately take less time to
+    // receive.
+    loop {
+        match client.sync_once(sync_settings.clone()).await {
+            Ok(response) => {
+                // This is the last time we need to provide this token, the sync method after
+                // will handle it on its own.
+                sync_settings = sync_settings.token(response.next_batch.clone());
+                match &aio.cfg.session_storage {
+                    crate::SessionStorage::Ephemeral => (),
+                    crate::SessionStorage::Plain(_, session) => {
+                        let user_session = client
+                            .matrix_auth()
+                            .session()
+                            .expect("A logged-in client should have a session");
+                        let data = PlainMatrixSession {
+                            user_session,
+                            sync_token: Some(response.next_batch),
+                        };
+                        let serialized_session = serde_json::to_string(&data)?;
+                        fs::write(&session.session_path, serialized_session).await?;
+                    }
+                    crate::SessionStorage::SecretService(..) => {
+                        let user_session = client
+                            .matrix_auth()
+                            .session()
+                            .expect("A logged-in client should have a session");
+                        let ss = SecretService::connect(EncryptionType::Dh).await?;
+                        let collection = match ss.get_default_collection().await {
+                            Ok(c) => c,
+                            Err(secret_service::Error::NoResult) => {
+                                ss.create_collection("matrix_mozilla_bot", "matrix_mozilla_bot")
+                                    .await?
+                            }
+                            Err(x) => {
+                                return Err(x.into());
+                            }
+                        };
+
+                        if let Some(refresh_token) = user_session.tokens.refresh_token {
+                            store_to_secret_service!(
+                                collection,
+                                "refresh_token",
+                                refresh_token.as_bytes()
+                            );
+                        }
+                        store_to_secret_service!(
+                            collection,
+                            "sync_token",
+                            response.next_batch.as_bytes()
+                        );
+                        store_to_secret_service!(
+                            collection,
+                            "access_token",
+                            user_session.tokens.access_token.as_bytes()
+                        );
+                        store_to_secret_service!(
+                            collection,
+                            "user_id",
+                            user_session.meta.user_id.as_bytes()
+                        );
+                        store_to_secret_service!(
+                            collection,
+                            "device_id",
+                            user_session.meta.device_id.as_bytes()
+                        );
+                    }
                 }
-                store_to_secret_service!(
-                    collection,
-                    "access_token",
-                    user_session.tokens.access_token.as_bytes()
-                );
-                store_to_secret_service!(
-                    collection,
-                    "user_id",
-                    user_session.meta.user_id.as_bytes()
-                );
-                store_to_secret_service!(
-                    collection,
-                    "device_id",
-                    user_session.meta.device_id.as_bytes()
-                );
+                // persist_sync_token(session_file, response.next_batch).await?;
+                break;
+            }
+            Err(error) => {
+                println!("An error occurred during initial sync: {error}");
+                println!("Trying again…");
             }
         }
     }
 
-    // An initial sync to set up state and so our bot doesn't respond to old
-    // messages. If the `StateStore` finds saved state in the location given the
-    // initial sync will be skipped in favor of loading state from the store
-    let response = client.sync_once(SyncSettings::default()).await?;
     // add our CommandBot to be notified of incoming messages, we do this after the
     // initial sync to avoid responding to messages before the bot was running.
     client.add_event_handler_context(aio.clone());
@@ -333,12 +400,7 @@ pub async fn login_and_sync(aio: SharedState) -> anyhow::Result<Client> {
     client.add_event_handler(on_room_message);
 
     let client_cc = client.clone();
-    // since we called `sync_once` before we entered our sync loop we must pass
-    // that sync token to `sync`
-    let settings = SyncSettings::default().token(response.next_batch);
-    // this keeps state from the server streaming in to CommandBot via the
-    // EventHandler trait
-    tokio::spawn(async move { client.sync(settings).await });
+    tokio::spawn(async move { client.sync(sync_settings).await });
 
     Ok(client_cc)
 }

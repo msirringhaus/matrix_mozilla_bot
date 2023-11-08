@@ -1913,6 +1913,7 @@ dependencies = [
  "rpassword",
  "scraper",
  "secret-service",
+ "serde",
  "serde_json",
  "tokio",
  "tracing-subscriber",
