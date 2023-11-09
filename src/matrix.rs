@@ -266,7 +266,7 @@ pub async fn store_ss_session(client: &Client, sync_token: &str) -> anyhow::Resu
     let collection = match ss.get_default_collection().await {
         Ok(c) => c,
         Err(secret_service::Error::NoResult) => {
-            ss.create_collection("matrix_mozilla_bot", "matrix_mozilla_bot")
+            ss.create_collection("matrix_mozilla_bot", "default")
                 .await?
         }
         Err(x) => {
@@ -412,6 +412,11 @@ pub async fn login_and_sync(aio: SharedState) -> anyhow::Result<Client> {
                         client_builder = client_builder.sqlite_store(&db.db_path, Some(&db.db_pw));
                     }
                     client = client_builder.build().await?;
+                    continue;
+                }
+                Some(ErrorKind::Forbidden) => {
+                    println!("Wrong password or username. Trying again.");
+                    logged_in = false;
                     continue;
                 }
                 Some(_) => {
