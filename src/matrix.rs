@@ -5,7 +5,7 @@ use matrix_sdk::{
     matrix_auth::{MatrixSession, MatrixSessionTokens},
     room::Room,
     ruma::{
-        api::client::filter::FilterDefinition,
+        api::client::{error::ErrorKind, filter::FilterDefinition},
         events::room::member::StrippedRoomMemberEvent,
         events::room::message::{
             MessageType, OriginalSyncRoomMessageEvent, RoomMessageEventContent,
@@ -332,8 +332,8 @@ pub async fn login_and_sync(aio: SharedState) -> anyhow::Result<Client> {
         client_builder = client_builder.sqlite_store(&db.db_path, Some(&db.db_pw));
     }
 
-    let client = client_builder.build().await?;
-    let (logged_in, sync_token) = match &aio.cfg.session_storage {
+    let mut client = client_builder.build().await?;
+    let (mut logged_in, sync_token) = match &aio.cfg.session_storage {
         crate::SessionStorage::Ephemeral => (false, None), // Nothing to restore
         crate::SessionStorage::Plain(_, session) => {
             if let Ok(sync_token) = restore_plain_session(&client, &session.session_path).await {
@@ -351,12 +351,8 @@ pub async fn login_and_sync(aio: SharedState) -> anyhow::Result<Client> {
         }
     };
 
-    if !logged_in {
-        login(&client, &aio).await?;
-    }
-
     let filter = FilterDefinition::with_lazy_loading();
-    let mut sync_settings = SyncSettings::default().filter(filter.into());
+    let mut sync_settings = SyncSettings::default().filter(filter.clone().into());
 
     // We restore the sync where we left.
     // This is not necessary when not using `sync_once`. The other sync methods get
@@ -364,11 +360,16 @@ pub async fn login_and_sync(aio: SharedState) -> anyhow::Result<Client> {
     if let Some(sync_token) = sync_token {
         sync_settings = sync_settings.token(sync_token);
     }
+
     // Let's ignore messages before the program was launched.
     // This is a loop in case the initial sync is longer than our timeout. The
     // server should cache the response and it will ultimately take less time to
     // receive.
     loop {
+        if !logged_in {
+            login(&client, &aio).await?;
+            logged_in = true;
+        }
         match client.sync_once(sync_settings.clone()).await {
             Ok(response) => {
                 // This is the last time we need to provide this token, the sync method after
@@ -387,10 +388,36 @@ pub async fn login_and_sync(aio: SharedState) -> anyhow::Result<Client> {
                 // persist_sync_token(session_file, response.next_batch).await?;
                 break;
             }
-            Err(error) => {
-                println!("An error occurred during initial sync: {error}");
-                println!("Trying again…");
-            }
+            Err(error) => match error.client_api_error_kind() {
+                None => {
+                    println!("An error occurred during initial sync: {error}");
+                    println!("Trying again…");
+                }
+                Some(ErrorKind::LimitExceeded { retry_after_ms }) => {
+                    sleep(retry_after_ms.unwrap_or(Duration::from_secs(5))).await;
+                    continue;
+                }
+                Some(ErrorKind::ConnectionTimeout) => {}
+                Some(ErrorKind::UnknownToken { .. }) | Some(ErrorKind::MissingToken) => {
+                    println!("The login data we sent didn't work (probably from restoring the session). Trying fresh login.");
+                    logged_in = false;
+                    // Unsetting sync_token isn't possible, so we recreate a new sync_setting-object
+                    sync_settings = SyncSettings::default().filter(filter.clone().into());
+                    let mut client_builder =
+                        Client::builder().homeserver_url(aio.cfg.homeserver_url.clone());
+                    if let Some(db) = &aio.cfg.session_storage.get_session_db() {
+                        println!("Removing storage DB");
+                        // We need to clear the database, too
+                        tokio::fs::remove_dir_all(&db.db_path).await?;
+                        client_builder = client_builder.sqlite_store(&db.db_path, Some(&db.db_pw));
+                    }
+                    client = client_builder.build().await?;
+                    continue;
+                }
+                Some(_) => {
+                    return Err(error.into());
+                }
+            },
         }
     }
 
