@@ -4,7 +4,6 @@ use matrix_sdk::{
     RoomState,
 };
 use regex::Regex;
-use secret_service::{blocking, EncryptionType};
 use std::{
     collections::HashSet,
     path::PathBuf,
@@ -54,9 +53,7 @@ impl SessionStorage {
             SessionStorage::Plain(db, session) => {
                 db.db_path.exists() && session.session_path.exists()
             }
-            SessionStorage::SecretService(db) => {
-                db.db_path.exists() && blocking::SecretService::connect(EncryptionType::Dh).is_ok()
-            }
+            SessionStorage::SecretService(db) => db.db_path.exists(),
         }
     }
 
